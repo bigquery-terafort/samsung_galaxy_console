@@ -567,7 +567,20 @@ class BQ:
               iap_order_count = S.iap_order_count,
               rating_score_sum = S.rating_score_sum, rating_volume = S.rating_volume,
               _loaded_at = S._loaded_at
-            WHEN NOT MATCHED THEN INSERT ROW
+            -- 🛡️ NAAM se INSERT — `INSERT ROW` NAHI.
+            --    `INSERT ROW` column ki TARTEEB par chalta hai. Agar table par
+            --    kabhi ALTER se naya column jur jaye (wo aakhir mein lagta hai)
+            --    to tarteeb toot jati hai aur ghalat column mein value chali
+            --    jati hai. Naam likhne se ye kabhi nahi hoga.
+            WHEN NOT MATCHED THEN INSERT (
+              date, content_id, app_name, package_name, content_status,
+              store_type, installs, revenue_usd, iap_order_count,
+              rating_score_sum, rating_volume, _loaded_at
+            ) VALUES (
+              S.date, S.content_id, S.app_name, S.package_name, S.content_status,
+              S.store_type, S.installs, S.revenue_usd, S.iap_order_count,
+              S.rating_score_sum, S.rating_volume, S._loaded_at
+            )
             """
             q = self.client.query(sql)
             q.result()
@@ -601,7 +614,16 @@ class BQ:
               paid = S.paid, modify_date = S.modify_date,
               version_code = S.version_code, version_name = S.version_name,
               _loaded_at = S._loaded_at
-            WHEN NOT MATCHED THEN INSERT ROW
+            -- 🛡️ NAAM se INSERT — tarteeb par bharosa nahi
+            WHEN NOT MATCHED THEN INSERT (
+              content_id, app_name, package_name, content_status,
+              standard_price, paid, modify_date,
+              version_code, version_name, _loaded_at
+            ) VALUES (
+              S.content_id, S.app_name, S.package_name, S.content_status,
+              S.standard_price, S.paid, S.modify_date,
+              S.version_code, S.version_name, S._loaded_at
+            )
             """
             q = self.client.query(sql)
             q.result()
