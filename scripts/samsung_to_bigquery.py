@@ -50,6 +50,7 @@ from google.cloud import bigquery
 API_BASE = "https://devapi.samsungapps.com"
 AUTH_URL = f"{API_BASE}/auth/accessToken"
 CONTENT_LIST_URL = f"{API_BASE}/seller/contentList"
+CONTENT_INFO_URL = f"{API_BASE}/seller/contentInfo"
 CONTENT_METRIC_URL = f"{API_BASE}/gss/query/contentMetric"
 
 # GSS metric IDs — docs se hu-ba-hu (spelling "volumne" Samsung ki apni hai)
@@ -109,6 +110,8 @@ class Config:
     request_timeout: int = field(default_factory=lambda: _env_int("REQUEST_TIMEOUT", 90))
     chunk_days: int = field(default_factory=lambda: _env_int("CHUNK_DAYS", 30))
     fail_threshold_pct: int = field(default_factory=lambda: _env_int("FAIL_THRESHOLD_PCT", 0))
+    # 🆕 package name ke liye har app par ek extra call (contentInfo)
+    fetch_packages: bool = field(default_factory=lambda: _env_bool("FETCH_PACKAGE_NAMES", True))
     total_budget_s: int = field(default_factory=lambda: _env_int("TOTAL_BUDGET_SECONDS", 3300))
 
     @property
@@ -309,6 +312,21 @@ class SamsungClient:
             raise RuntimeError(f"contentList list nahi mili: {str(data)[:300]}")
         return data
 
+    def content_info(self, content_id: str) -> dict[str, Any]:
+        """
+        🆕 App ki tafseel — package name YAHI se milta hai.
+
+        /seller/contentList package name deta HI NAHI (docs se tasdeeq shuda) —
+        wo sirf contentName/contentId/status/price deta hai.
+        Package `contentInfo` ke `binaryList[].packageName` mein hota hai.
+        """
+        data = self.request("GET", f"{CONTENT_INFO_URL}?contentId={content_id}",
+                            label=f"contentInfo[{content_id}]")
+        # jawab list mein aata hai: [{...}]
+        if isinstance(data, list):
+            return data[0] if data else {}
+        return data if isinstance(data, dict) else {}
+
     def content_metric(self, content_id: str, start: date, end: date) -> dict[str, Any]:
         body = {
             "contentId": content_id,
@@ -328,6 +346,41 @@ class SamsungClient:
 # ══════════════════════════════════════════════════════════════════════════════
 #  PARSING — nested JSON → flat rows
 # ══════════════════════════════════════════════════════════════════════════════
+
+def extract_package(info: dict[str, Any]) -> tuple[str | None, str | None, str | None]:
+    """
+    contentInfo ke `binaryList` se package + version nikalta hai.
+
+    Ek app ke kai binary ho sakte hain (alag versionCode). Sab ka package
+    aksar ek hi hota hai — magar hum sab se NAYA (sab se bara versionCode)
+    uthate hain, taake latest wala mile.
+    """
+    blist = info.get("binaryList")
+    if not isinstance(blist, list) or not blist:
+        return None, None, None
+
+    best, best_vc = None, -1
+    for b in blist:
+        if not isinstance(b, dict):
+            continue
+        pkg = (b.get("packageName") or "").strip()
+        if not pkg:
+            continue
+        try:
+            vc = int(str(b.get("versionCode") or 0).strip() or 0)
+        except ValueError:
+            vc = 0
+        if vc >= best_vc:
+            best, best_vc = b, vc
+
+    if not best:
+        return None, None, None
+    return (
+        (best.get("packageName") or "").strip().lower() or None,
+        str(best.get("versionCode") or "").strip() or None,
+        str(best.get("versionName") or "").strip() or None,
+    )
+
 
 def _f(v: Any) -> float:
     try:
@@ -376,8 +429,9 @@ def parse_content_metric(payload: dict[str, Any], content_id: str,
         rows.append({
             "date": day,
             "content_id": content_id,
-            "app_name": app_meta.get("contentName") or content_info.get("content_name"),
-            "package_name": content_info.get("package_name"),
+            "app_name": app_meta.get("app_name") or content_info.get("content_name"),
+            # 🆕 package contentInfo se aaya (app_meta mein bhar chuke hain)
+            "package_name": app_meta.get("package_name"),
             "content_status": app_meta.get("contentStatus") or content_info.get("status"),
             "store_type": content_info.get("store_type"),
             "installs": int(m.get(METRIC_INSTALLS, 0.0)),
@@ -417,6 +471,8 @@ SCHEMA_APPS = [
     bigquery.SchemaField("standard_price", "FLOAT64"),
     bigquery.SchemaField("paid", "STRING"),
     bigquery.SchemaField("modify_date", "STRING"),
+    bigquery.SchemaField("version_code", "STRING"),
+    bigquery.SchemaField("version_name", "STRING"),
     bigquery.SchemaField("_loaded_at", "TIMESTAMP"),
 ]
 
@@ -517,7 +573,9 @@ class BQ:
             WHEN MATCHED THEN UPDATE SET
               app_name = S.app_name, package_name = S.package_name,
               content_status = S.content_status, standard_price = S.standard_price,
-              paid = S.paid, modify_date = S.modify_date, _loaded_at = S._loaded_at
+              paid = S.paid, modify_date = S.modify_date,
+              version_code = S.version_code, version_name = S.version_name,
+              _loaded_at = S._loaded_at
             WHEN NOT MATCHED THEN INSERT ROW
             """
             q = self.client.query(sql)
@@ -588,6 +646,8 @@ def main() -> int:
         "standard_price": _f(a.get("standardPrice")),
         "paid": a.get("paid"),
         "modify_date": a.get("modifyDate"),
+        "version_code": None,      # 🆕 contentInfo se bharega
+        "version_name": None,      # 🆕
         "_loaded_at": now_iso,
     } for a in raw_apps if str(a.get("contentId") or "").strip()]
 
@@ -597,6 +657,45 @@ def main() -> int:
         return 1
 
     log.info("📱 %d apps mile", len(apps))
+
+    # ── 1b. 🆕 PACKAGE NAME — contentInfo se ──
+    #    /seller/contentList package name deta HI NAHI (Samsung docs).
+    #    Wo `contentInfo` ke `binaryList[].packageName` mein hota hai —
+    #    is liye har app par ek extra call. Ye SOFT hai: fail ho to
+    #    package NULL rahega magar poori run nahi rukegi (paisa isi mein
+    #    nahi hai, sirf naam hai).
+    if cfg.fetch_packages:
+        got = 0
+        pkg_failed = 0
+        for i, app in enumerate(apps, 1):
+            try:
+                info = client.content_info(app["content_id"])
+                pkg, vcode, vname = extract_package(info)
+                if pkg:
+                    app["package_name"] = pkg
+                    got += 1
+                app["version_code"] = vcode
+                app["version_name"] = vname
+                # naam bhi behtar mil jaye to le lo
+                if not app.get("app_name"):
+                    app["app_name"] = (info.get("appTitle") or "").strip() or None
+            except TimeoutError as e:
+                log.error("🔴 %s", e)
+                gha("error", f"Samsung: {e}")
+                return 1
+            except Exception as e:  # noqa: BLE001
+                pkg_failed += 1
+                log.warning("⚠️  contentInfo %s nakaam: %s", app["content_id"], str(e)[:140])
+            if i % 25 == 0 or i == len(apps):
+                log.info("   … package %d/%d  ·  mile %d", i, len(apps), got)
+        log.info("📦 package name: %d/%d mile%s",
+                 got, len(apps),
+                 f"  ·  {pkg_failed} call nakaam" if pkg_failed else "")
+        if got == 0:
+            log.warning("⚠️  EK BHI package name nahi mila — contentInfo ka jawab dekho")
+            gha("warning", "Samsung: package name ek bhi nahi mila")
+    else:
+        log.info("⏭️  FETCH_PACKAGE_NAMES=false — package name nahi laaye")
 
     # ── 2. har app ka rozana data ──
     all_rows: list[dict[str, Any]] = []
@@ -650,8 +749,9 @@ def main() -> int:
     rev = sum(r["revenue_usd"] for r in all_rows)
     ins = sum(r["installs"] for r in all_rows)
     days = len({r["date"] for r in all_rows})
-    log.info("   revenue $%.2f  ·  installs %s  ·  din %d  ·  apps %d",
-             rev, f"{ins:,}", days, len({r['content_id'] for r in all_rows}))
+    with_pkg = len({r["content_id"] for r in all_rows if r.get("package_name")})
+    log.info("   revenue $%.2f  ·  installs %s  ·  din %d  ·  apps %d  ·  package wale %d",
+             rev, f"{ins:,}", days, len({r['content_id'] for r in all_rows}), with_pkg)
 
     if cfg.dry_run:
         log.info("🧪 DRY_RUN — BigQuery ko haath nahi lagaya")
