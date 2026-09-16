@@ -1,0 +1,8 @@
+# Samsung Galaxy Store → BigQuery loader
+# 🔒 version pinned — build kabhi apne aap na toote
+
+requests==2.32.3
+PyJWT==2.9.0
+cryptography==43.0.1          # PyJWT ko RS256 ke liye chahiye
+google-cloud-bigquery==3.25.0
+google-auth==2.35.0
