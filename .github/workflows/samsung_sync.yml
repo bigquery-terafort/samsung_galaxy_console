@@ -1,0 +1,132 @@
+name: Samsung Galaxy Store → BigQuery
+
+# ════════════════════════════════════════════════════════════════════════════
+#  SAMSUNG GALAXY STORE SYNC                                        v1.0
+#
+#  ⏰ TARTEEB (poore pipeline mein):
+#       03:30 UTC   samsung_sync          ← YE
+#       ...         baqi loaders
+#       07:24       saari *_staging
+#       08:00       dlight_master_merge
+#       08:05       samsung_master_merge
+#       08:15       unified_daily_performance
+#
+#  🔐 SECRETS (Settings → Secrets and variables → Actions):
+#       SAMSUNG_SERVICE_ACCOUNT_ID   Seller Portal → Assistance → API Service
+#       SAMSUNG_PRIVATE_KEY          wahi se download hui private key (poori,
+#                                    -----BEGIN PRIVATE KEY----- ke saath)
+#       GCP_WIF_PROVIDER             Workload Identity Federation provider
+#       GCP_SERVICE_ACCOUNT          BigQuery wala service account email
+#
+#  📋 VARIABLES (Settings → Secrets and variables → Actions → Variables):
+#       GCP_PROJECT                  terafort
+#       BQ_DATASET                   samsung
+# ════════════════════════════════════════════════════════════════════════════
+
+on:
+  schedule:
+    # rozana 03:30 UTC — Samsung ka data raat ko taiyar hota hai
+    - cron: '30 3 * * *'
+
+  workflow_dispatch:
+    inputs:
+      lookback_days:
+        description: 'Kitne din peeche tak (default 14)'
+        required: false
+        default: '14'
+      backfill_start:
+        description: 'Backfill shuru (YYYY-MM-DD) — khali chhodo to lookback chalega'
+        required: false
+        default: ''
+      backfill_end:
+        description: 'Backfill khatam (YYYY-MM-DD)'
+        required: false
+        default: ''
+      dry_run:
+        description: 'DRY RUN — BigQuery ko haath na lagao'
+        type: boolean
+        required: false
+        default: false
+      chunk_days:
+        description: 'Ek call mein kitne din (default 30)'
+        required: false
+        default: '30'
+
+# 🛡️ ek waqt mein ek hi run — do saath chalein to MERGE takraa sakti hai
+concurrency:
+  group: samsung-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write        # 🔑 Workload Identity Federation ke liye lazmi
+
+jobs:
+  sync:
+    name: Samsung → BigQuery
+    runs-on: ubuntu-latest
+    timeout-minutes: 60          # 🛡️ atak jaye to khud mar jaye
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python setup
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # 🔐 WIF — koi JSON key file kahin nahi rakhi jati
+      - name: Google Cloud auth (WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Samsung sync
+        env:
+          # ── Samsung ──
+          SAMSUNG_SERVICE_ACCOUNT_ID: ${{ secrets.SAMSUNG_SERVICE_ACCOUNT_ID }}
+          SAMSUNG_PRIVATE_KEY:        ${{ secrets.SAMSUNG_PRIVATE_KEY }}
+
+          # ── BigQuery ──
+          GCP_PROJECT: ${{ vars.GCP_PROJECT }}
+          BQ_DATASET:  ${{ vars.BQ_DATASET || 'samsung' }}
+          BQ_LOCATION: ${{ vars.BQ_LOCATION || 'US' }}
+
+          # ── range ──
+          LOOKBACK_DAYS:  ${{ github.event.inputs.lookback_days  || '14' }}
+          BACKFILL_START: ${{ github.event.inputs.backfill_start || '' }}
+          BACKFILL_END:   ${{ github.event.inputs.backfill_end   || '' }}
+          CHUNK_DAYS:     ${{ github.event.inputs.chunk_days     || '30' }}
+
+          # ── guards ──
+          DRY_RUN:              ${{ github.event.inputs.dry_run || 'false' }}
+          MAX_RETRIES:          '5'
+          THROTTLE_MS:          '400'
+          REQUEST_TIMEOUT:      '90'
+          FAIL_THRESHOLD_PCT:   '0'      # 🛡️ ek app bhi fail = kuch na likho
+          TOTAL_BUDGET_SECONDS: '3300'   # 55 min (job timeout 60 hai)
+        run: python scripts/samsung_to_bigquery.py
+
+      - name: 🔴 Nakaami par batao
+        if: failure()
+        run: |
+          echo "::error::Samsung sync NAKAAM — BigQuery mein kuch nahi likha gaya (FAIL CLOSED)"
+          {
+            echo "### 🔴 Samsung sync nakaam"
+            echo ""
+            echo "**FAIL CLOSED** — adhoora data BigQuery mein nahi gaya."
+            echo ""
+            echo "Dekhne wali cheezein:"
+            echo "- \`SAMSUNG_PRIVATE_KEY\` poori hai? (BEGIN/END lines ke saath)"
+            echo "- \`SAMSUNG_SERVICE_ACCOUNT_ID\` Seller Portal wali hi hai?"
+            echo "- Service account revoke to nahi hua?"
+            echo "- Samsung API down to nahi? https://developer.samsung.com/system-status"
+          } >> "$GITHUB_STEP_SUMMARY"
