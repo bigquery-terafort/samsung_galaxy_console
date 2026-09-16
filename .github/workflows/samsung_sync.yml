@@ -1,4 +1,4 @@
-name: Samsung Galaxy Store → BigQuery
+name: Samsung Galaxy Store → BigQuery (JSON key)
 
 # ════════════════════════════════════════════════════════════════════════════
 #  SAMSUNG GALAXY STORE SYNC                                        v1.0
@@ -15,12 +15,16 @@ name: Samsung Galaxy Store → BigQuery
 #       SAMSUNG_SERVICE_ACCOUNT_ID   Seller Portal → Assistance → API Service
 #       SAMSUNG_PRIVATE_KEY          wahi se download hui private key (poori,
 #                                    -----BEGIN PRIVATE KEY----- ke saath)
-#       GCP_WIF_PROVIDER             Workload Identity Federation provider
-#       GCP_SERVICE_ACCOUNT          BigQuery wala service account email
+#       GCP_SA_KEY                   BigQuery wale service account ki JSON key
+#                                    (poori file ka content, { se } tak)
 #
-#  📋 VARIABLES (Settings → Secrets and variables → Actions → Variables):
-#       GCP_PROJECT                  terafort
-#       BQ_DATASET                   samsung
+#  ⚠️ NOTE: ye JSON-KEY wala variant hai. Agar aage WIF laga do to
+#     `samsung_sync_wif.yml` use karna — wo zyada mehfooz hai.
+#
+#  📋 GCP_PROJECT + BQ_DATASET
+#       Variables mein rakho YA Secrets mein — workflow dono se parh leti hai.
+#       GCP_PROJECT   terafort
+#       BQ_DATASET    samsung
 # ════════════════════════════════════════════════════════════════════════════
 
 on:
@@ -58,8 +62,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
-  id-token: write        # 🔑 Workload Identity Federation ke liye lazmi
+  contents: read         # JSON key mein id-token ki zaroorat nahi
 
 jobs:
   sync:
@@ -82,12 +85,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # 🔐 WIF — koi JSON key file kahin nahi rakhi jati
-      - name: Google Cloud auth (WIF)
+      # 🔐 JSON key se auth
+      - name: Google Cloud auth (JSON key)
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
-          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
 
       - name: Samsung sync
         env:
@@ -96,9 +98,10 @@ jobs:
           SAMSUNG_PRIVATE_KEY:        ${{ secrets.SAMSUNG_PRIVATE_KEY }}
 
           # ── BigQuery ──
-          GCP_PROJECT: ${{ vars.GCP_PROJECT }}
-          BQ_DATASET:  ${{ vars.BQ_DATASET || 'samsung' }}
-          BQ_LOCATION: ${{ vars.BQ_LOCATION || 'US' }}
+          # 🔧 vars YA secrets — jahan bhi rakhe hon, dono se parh lega
+          GCP_PROJECT: ${{ vars.GCP_PROJECT || secrets.GCP_PROJECT }}
+          BQ_DATASET:  ${{ vars.BQ_DATASET || secrets.BQ_DATASET || 'samsung' }}
+          BQ_LOCATION: ${{ vars.BQ_LOCATION || secrets.BQ_LOCATION || 'US' }}
 
           # ── range ──
           LOOKBACK_DAYS:  ${{ github.event.inputs.lookback_days  || '14' }}
