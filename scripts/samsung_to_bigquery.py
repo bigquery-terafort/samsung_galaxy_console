@@ -495,18 +495,43 @@ class BQ:
     def ensure_table(self, table_id: str, schema: list[bigquery.SchemaField],
                      *, partition_on: str | None = None,
                      cluster: list[str] | None = None) -> None:
+        """
+        Table banati hai — aur agar pehle se hai to SCHEMA MIGRATE karti hai.
+
+        🛡️ KYUN: purani table par naye column add karo to MERGE
+           "Unrecognized name: <column>" de kar mar jati hai. Ye function
+           naye column khud jod deta hai (NULLABLE, is liye purani rows
+           mehfooz rehti hain).
+
+        ⚠️ Sirf JORTA hai — kabhi kuch hataata ya badalta NAHI.
+        """
         try:
-            self.client.get_table(table_id)
-            return
+            existing = self.client.get_table(table_id)
         except gexc.NotFound:
-            pass
-        t = bigquery.Table(table_id, schema=schema)
-        if partition_on:
-            t.time_partitioning = bigquery.TimePartitioning(field=partition_on)
-        if cluster:
-            t.clustering_fields = cluster
-        self.client.create_table(t)
-        log.info("📦 table banayi: %s", table_id)
+            t = bigquery.Table(table_id, schema=schema)
+            if partition_on:
+                t.time_partitioning = bigquery.TimePartitioning(field=partition_on)
+            if cluster:
+                t.clustering_fields = cluster
+            self.client.create_table(t)
+            log.info("📦 table banayi: %s", table_id)
+            return
+
+        # 🆕 schema migration — jo column kam hain wo jod do
+        have = {f.name for f in existing.schema}
+        missing = [f for f in schema if f.name not in have]
+        if not missing:
+            return
+
+        # naye column hamesha NULLABLE — warna purani rows toot jayengi
+        added = [bigquery.SchemaField(f.name, f.field_type, mode="NULLABLE",
+                                      description=f.description)
+                 for f in missing]
+        existing.schema = list(existing.schema) + added
+        self.client.update_table(existing, ["schema"])
+        log.info("🔧 %s mein %d naye column jode: %s",
+                 table_id.split(".")[-1], len(added),
+                 ", ".join(f.name for f in added))
 
     def merge_daily(self, rows: list[dict[str, Any]]) -> int:
         """
