@@ -82,6 +82,17 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
+      - name: Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # 🔐 JSON key se auth
+      - name: Google Cloud auth (JSON key)
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
       # ══════════════════════════════════════════════════════════════════════
       # 🔧 bq CLI — self-heal/verify ke liye. WAHI secret jo loader use karta hai.
       #    Koi naya secret nahi.
@@ -143,19 +154,9 @@ jobs:
 
       # 🔁 RETRY — neeche wala main step 3 baar koshish karta hai.
       #    (nick-fields/retry se: platform API 5xx / timeout par khud dobara)
-      - name: Dependencies
-        if: steps.before.outputs.skip != 'true'
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      # 🔐 JSON key se auth
-      - name: Google Cloud auth (JSON key)
-        uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
 
       - name: Samsung sync
+        if: steps.before.outputs.skip != 'true'
         env:
           # ── Samsung ──
           SAMSUNG_SERVICE_ACCOUNT_ID: ${{ secrets.SAMSUNG_SERVICE_ACCOUNT_ID }}
